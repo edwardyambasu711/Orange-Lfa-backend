@@ -1,0 +1,337 @@
+import Fastify, { type FastifyInstance } from "fastify";
+import cookie from "@fastify/cookie";
+import cors from "@fastify/cors";
+import websocket from "@fastify/websocket";
+import { z } from "zod";
+import {
+  authenticateUser,
+  createSession,
+  getSessionUser,
+  hashSessionToken,
+  type AuthUser,
+} from "./auth.js";
+import { loadConfig, type AppConfig } from "./config.js";
+import type { Database } from "./db.js";
+
+const loginSchema = z.object({
+  email: z.string().trim().email(),
+  password: z.string().min(8).max(128),
+});
+
+const mediaSchema = z.object({
+  folder: z.string().min(1).max(100),
+  name: z.string().min(1).max(255),
+  type: z.string().min(1).max(100),
+  data: z.string().startsWith("data:").max(15_000_000),
+});
+
+const resourceNameSchema = z.string().regex(/^[a-z][a-zA-Z0-9_]*$/);
+
+function publicDocument<T extends Record<string, unknown>>(document: T): T {
+  const { _id: _ignored, ...rest } = document;
+  return rest as T;
+}
+
+declare module "fastify" {
+  interface FastifyRequest {
+    authUser: AuthUser | null;
+  }
+}
+
+export async function buildApp(
+  database: Database,
+  config: AppConfig = loadConfig(),
+): Promise<FastifyInstance> {
+  const app = Fastify({ logger: true });
+
+  await app.register(cookie, { secret: config.SESSION_SECRET });
+  await app.register(cors, { origin: config.FRONTEND_ORIGIN, credentials: true });
+  await app.register(websocket);
+
+  app.decorateRequest("authUser", null);
+  app.addHook("preHandler", async (request) => {
+    request.authUser = await getSessionUser(database, request);
+  });
+
+  app.get("/health", async () => ({ status: "ok", service: "orange-league-api" }));
+  app.get("/ready", async (_request, reply) => {
+    try {
+      await database.db.command({ ping: 1 });
+      return { status: "ready", database: "connected" };
+    } catch {
+      return reply.code(503).send({ status: "not_ready", database: "unavailable" });
+    }
+  });
+
+  app.post("/api/v1/auth/login", async (request, reply) => {
+    const parsed = loginSchema.safeParse(request.body);
+    if (!parsed.success)
+      return reply.code(400).send({ error: "invalid_request", details: parsed.error.flatten() });
+
+    const user = await authenticateUser(database, parsed.data.email, parsed.data.password);
+    if (!user) return reply.code(401).send({ error: "invalid_credentials" });
+
+    const token = await createSession(database, config, user);
+    reply.setCookie("orange_league_session", token, {
+      httpOnly: true,
+      secure: config.NODE_ENV === "production",
+      sameSite: "lax",
+      path: "/",
+      maxAge: config.SESSION_TTL_DAYS * 24 * 60 * 60,
+    });
+    return { user };
+  });
+
+  app.post("/api/v1/auth/logout", async (request, reply) => {
+    const token = request.cookies.orange_league_session;
+    if (token)
+      await database.db.collection("sessions").deleteOne({ tokenHash: hashSessionToken(token) });
+    reply.clearCookie("orange_league_session", { path: "/" });
+    return { success: true };
+  });
+
+  app.get("/api/v1/auth/me", async (request, reply) => {
+    if (!request.authUser) return reply.code(401).send({ error: "unauthorized" });
+    return { user: request.authUser };
+  });
+
+  app.post("/api/v1/media", async (request, reply) => {
+    if (!request.authUser) return reply.code(401).send({ error: "unauthorized" });
+    const parsed = mediaSchema.safeParse(request.body);
+    if (!parsed.success)
+      return reply.code(400).send({ error: "invalid_request", details: parsed.error.flatten() });
+
+    const mediaId = crypto.randomUUID();
+    await database.db.collection("media").insertOne({
+      id: mediaId,
+      ownerId: request.authUser.id,
+      folder: parsed.data.folder,
+      name: parsed.data.name,
+      type: parsed.data.type,
+      data: parsed.data.data,
+      createdAt: new Date(),
+    });
+    return { id: mediaId, url: parsed.data.data };
+  });
+
+  app.get<{ Params: { teamId: string } }>(
+    "/api/v1/public/teams/:teamId/dashboard",
+    async (request, reply) => {
+      const dashboard = await database.db
+        .collection("teamDashboards")
+        .findOne({ teamId: request.params.teamId });
+      if (!dashboard) return reply.code(404).send({ error: "not_found" });
+      const data = dashboard.data as Record<string, any>;
+      return {
+        ...data,
+        news: Array.isArray(data.news)
+          ? data.news.filter((item) => item.status === "Published")
+          : [],
+        pages: Array.isArray(data.pages) ? data.pages.filter((page) => page.published) : [],
+      };
+    },
+  );
+
+  app.get("/api/v1/public/teams", async () => {
+    const rows = await database.db
+      .collection("teams")
+      .find({ deletedAt: { $exists: false } })
+      .limit(1000)
+      .toArray();
+    return rows.map((row) => publicDocument(row));
+  });
+
+  app.get("/api/v1/public/matches", async () => {
+    const rows = await database.db
+      .collection("matches")
+      .find({ deletedAt: { $exists: false } })
+      .sort({ kickoff: 1 })
+      .limit(1000)
+      .toArray();
+    return rows.map((row) => publicDocument(row));
+  });
+
+  app.get("/api/v1/public/standings", async () => {
+    const rows = await database.db
+      .collection("standings")
+      .find({ deletedAt: { $exists: false } })
+      .sort({ position: 1 })
+      .limit(1000)
+      .toArray();
+    return rows.map((row) => publicDocument(row));
+  });
+
+  app.get("/api/v1/public/news", async () => {
+    const rows = await database.db
+      .collection("news")
+      .find({ status: { $in: ["Published", "published"] }, deletedAt: { $exists: false } })
+      .sort({ publishedAt: -1 })
+      .limit(1000)
+      .toArray();
+    return rows.map((row) => publicDocument(row));
+  });
+
+  app.get<{
+    Params: { resource: string };
+    Querystring: { search?: string; sort?: string; direction?: string };
+  }>("/api/v1/admin/:resource", async (request, reply) => {
+    const resource = resourceNameSchema.safeParse(request.params.resource);
+    if (!resource.success) return reply.code(400).send({ error: "invalid_resource" });
+
+    const filter: Record<string, unknown> = { deletedAt: { $exists: false } };
+    if (request.query.search) {
+      filter.$or = [
+        { name: { $regex: request.query.search, $options: "i" } },
+        { title: { $regex: request.query.search, $options: "i" } },
+        { displayName: { $regex: request.query.search, $options: "i" } },
+      ];
+    }
+    const sort = request.query.sort
+      ? { [request.query.sort]: (request.query.direction === "desc" ? -1 : 1) as 1 | -1 }
+      : { createdAt: -1 as const };
+    const rows = await database.db
+      .collection(resource.data)
+      .find(filter)
+      .sort(sort)
+      .limit(1000)
+      .toArray();
+    return rows.map((row) => publicDocument(row));
+  });
+
+  app.post<{ Params: { resource: string }; Body: Record<string, unknown> }>(
+    "/api/v1/admin/:resource",
+    async (request, reply) => {
+      if (!request.authUser) return reply.code(401).send({ error: "unauthorized" });
+      if (
+        !request.authUser.roles.includes("super_admin") &&
+        !request.authUser.roles.includes("content_admin")
+      ) {
+        return reply.code(403).send({ error: "forbidden" });
+      }
+      const resource = resourceNameSchema.safeParse(request.params.resource);
+      if (!resource.success) return reply.code(400).send({ error: "invalid_resource" });
+      const now = new Date();
+      const document = {
+        ...request.body,
+        id: request.body.id ?? crypto.randomUUID(),
+        createdAt: now,
+        updatedAt: now,
+      };
+      await database.db.collection(resource.data).insertOne(document);
+      return reply.code(201).send(publicDocument(document));
+    },
+  );
+
+  app.patch<{ Params: { resource: string; id: string }; Body: Record<string, unknown> }>(
+    "/api/v1/admin/:resource/:id",
+    async (request, reply) => {
+      if (!request.authUser) return reply.code(401).send({ error: "unauthorized" });
+      if (
+        !request.authUser.roles.includes("super_admin") &&
+        !request.authUser.roles.includes("content_admin")
+      ) {
+        return reply.code(403).send({ error: "forbidden" });
+      }
+      const resource = resourceNameSchema.safeParse(request.params.resource);
+      if (!resource.success) return reply.code(400).send({ error: "invalid_resource" });
+      const update = { ...request.body, updatedAt: new Date() };
+      const result = await database.db
+        .collection(resource.data)
+        .findOneAndUpdate({ id: request.params.id }, { $set: update }, { returnDocument: "after" });
+      if (!result) return reply.code(404).send({ error: "not_found" });
+      return publicDocument(result);
+    },
+  );
+
+  app.delete<{ Params: { resource: string; id: string } }>(
+    "/api/v1/admin/:resource/:id",
+    async (request, reply) => {
+      if (!request.authUser) return reply.code(401).send({ error: "unauthorized" });
+      if (!request.authUser.roles.includes("super_admin"))
+        return reply.code(403).send({ error: "forbidden" });
+      const resource = resourceNameSchema.safeParse(request.params.resource);
+      if (!resource.success) return reply.code(400).send({ error: "invalid_resource" });
+      await database.db
+        .collection(resource.data)
+        .updateOne(
+          { id: request.params.id },
+          { $set: { deletedAt: new Date(), updatedAt: new Date() } },
+        );
+      return { success: true };
+    },
+  );
+
+  app.get<{ Querystring: { teamId?: string } }>(
+    "/api/v1/team/dashboard",
+    async (request, reply) => {
+      if (!request.authUser) return reply.code(401).send({ error: "unauthorized" });
+      const teamId = request.query.teamId ?? request.authUser.teamId;
+      if (
+        !teamId ||
+        (request.authUser.roles.includes("team_admin") && request.authUser.teamId !== teamId)
+      ) {
+        return reply.code(403).send({ error: "forbidden" });
+      }
+      const dashboard = await database.db.collection("teamDashboards").findOne({ teamId });
+      if (!dashboard) return reply.code(404).send({ error: "not_found" });
+      return dashboard.data;
+    },
+  );
+
+  app.put<{ Body: { teamId: string; data: Record<string, unknown>; action?: string } }>(
+    "/api/v1/team/dashboard",
+    async (request, reply) => {
+      if (!request.authUser) return reply.code(401).send({ error: "unauthorized" });
+      const { teamId, data, action = "Updated team dashboard" } = request.body;
+      if (request.authUser.roles.includes("team_admin") && request.authUser.teamId !== teamId) {
+        return reply.code(403).send({ error: "forbidden" });
+      }
+      await database.db.collection("teamDashboards").updateOne(
+        { teamId },
+        {
+          $set: { teamId, data, updatedAt: new Date() },
+          $setOnInsert: { createdAt: new Date() },
+        },
+        { upsert: true },
+      );
+      await database.db
+        .collection("auditLogs")
+        .insertOne({ teamId, action, actor: request.authUser.email, createdAt: new Date() });
+      return data;
+    },
+  );
+
+  app.get<{ Querystring: { teamId?: string } }>("/api/v1/team/audit", async (request, reply) => {
+    if (!request.authUser) return reply.code(401).send({ error: "unauthorized" });
+    const teamId = request.query.teamId ?? request.authUser.teamId;
+    if (
+      !teamId ||
+      (request.authUser.roles.includes("team_admin") && request.authUser.teamId !== teamId)
+    ) {
+      return reply.code(403).send({ error: "forbidden" });
+    }
+    const logs = await database.db
+      .collection("auditLogs")
+      .find({ teamId })
+      .sort({ createdAt: -1 })
+      .limit(25)
+      .toArray();
+    return logs.map((log) => ({
+      id: String(log._id),
+      action: log.action,
+      actor: log.actor,
+      at: log.createdAt,
+    }));
+  });
+
+  app.get("/api/v1/ws", { websocket: true }, (socket) => {
+    socket.send(
+      JSON.stringify({
+        type: "connected",
+        message: "Match rooms will be enabled in the match-center phase.",
+      }),
+    );
+  });
+
+  return app;
+}
