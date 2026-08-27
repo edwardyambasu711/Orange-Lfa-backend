@@ -4,7 +4,7 @@ import { z } from "zod";
 const environmentSchema = z.object({
   MONGODB_URI: z.string().default("mongodb+srv://edwardsyambasu_db_user:bxhuqJ83mhFQG78K@cluster0.nwnbuqt.mongodb.net/?retryWrites=true&w=majority"),
   MONGODB_DATABASE: z.string().default("orange_league"),
-  API_HOST: z.string().default("127.0.0.1"),
+  API_HOST: z.string().default("0.0.0.0"),
   API_PORT: z.coerce.number().int().positive().default(4000),
   FRONTEND_ORIGIN: z.string().default("http://localhost:5173"),
   SESSION_SECRET: z.string().min(32).default("local-development-session-secret-change-me"),
