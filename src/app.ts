@@ -45,7 +45,10 @@ export async function buildApp(
   const app = Fastify({ logger: true });
 
   await app.register(cookie, { secret: config.SESSION_SECRET });
-  await app.register(cors, { origin: config.FRONTEND_ORIGIN, credentials: true });
+  await app.register(cors, {
+    origin: [config.FRONTEND_ORIGIN, "https://orange-league-control.vercel.app"],
+    credentials: true,
+  });
   await app.register(websocket);
 
   app.decorateRequest("authUser", null);
