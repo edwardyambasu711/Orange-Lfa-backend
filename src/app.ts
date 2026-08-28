@@ -78,7 +78,7 @@ export async function buildApp(
     reply.setCookie("orange_league_session", token, {
       httpOnly: true,
       secure: config.NODE_ENV === "production",
-      sameSite: "lax",
+      sameSite: config.NODE_ENV === "production" ? "none" : "lax",
       path: "/",
       maxAge: config.SESSION_TTL_DAYS * 24 * 60 * 60,
     });
