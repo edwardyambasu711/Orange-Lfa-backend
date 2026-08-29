@@ -106,8 +106,12 @@ export async function buildApp(
 
   await app.register(cookie, { secret: config.SESSION_SECRET });
   await app.register(cors, {
-    origin: [config.FRONTEND_ORIGIN, "https://orange-league-control.vercel.app"],
-    credentials: true 
+    origin: [
+      config.FRONTEND_ORIGIN,
+      "https://orange-league-control.vercel.app",
+      "https://test-lac-pi-18.vercel.app",
+    ],
+    credentials: true,
   });
   await app.register(websocket);
 
