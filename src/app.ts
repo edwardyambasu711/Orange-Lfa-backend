@@ -2,7 +2,9 @@ import Fastify, { type FastifyInstance } from "fastify";
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
+import { v2 as cloudinary } from "cloudinary";
 import { z } from "zod";
+import { randomUUID } from "node:crypto";
 import {
   authenticateUser,
   createSession,
@@ -27,6 +29,64 @@ const mediaSchema = z.object({
 
 const resourceNameSchema = z.string().regex(/^[a-z][a-zA-Z0-9_]*$/);
 
+async function uploadMediaToCloudinary(
+  config: AppConfig,
+  data: string,
+  folder: string,
+  name: string,
+  mimeType: string,
+): Promise<string> {
+  if (!config.CLOUDINARY_CLOUD_NAME || !config.CLOUDINARY_API_KEY || !config.CLOUDINARY_API_SECRET) {
+    throw new Error("cloudinary_not_configured");
+  }
+
+  cloudinary.config({
+    cloud_name: config.CLOUDINARY_CLOUD_NAME,
+    api_key: config.CLOUDINARY_API_KEY,
+    api_secret: config.CLOUDINARY_API_SECRET,
+    secure: true,
+  });
+
+  const normalizedFolder = [config.CLOUDINARY_FOLDER, folder].filter(Boolean).join("/");
+  const resourceType = mimeType.startsWith("video/") ? "video" : "image";
+  const publicId = name.replace(/\.[^/.]+$/, "") || "upload";
+
+  const result = await cloudinary.uploader.upload(data, {
+    folder: normalizedFolder,
+    public_id: publicId,
+    resource_type: resourceType,
+    overwrite: false,
+  });
+
+  return result.secure_url;
+}
+
+function createCloudinaryUploadSignature(config: AppConfig, folder: string, fileName: string) {
+  if (!config.CLOUDINARY_CLOUD_NAME || !config.CLOUDINARY_API_KEY || !config.CLOUDINARY_API_SECRET) {
+    throw new Error("cloudinary_not_configured");
+  }
+
+  const timestamp = Math.floor(Date.now() / 1000);
+  const normalizedFolder = [config.CLOUDINARY_FOLDER, folder].filter(Boolean).join("/");
+  const publicId = fileName.replace(/\.[^/.]+$/, "") || "upload";
+  const params = {
+    folder: normalizedFolder,
+    public_id: publicId,
+    timestamp,
+  };
+
+  return {
+    apiKey: config.CLOUDINARY_API_KEY,
+    cloudName: config.CLOUDINARY_CLOUD_NAME,
+    uploadUrl: `https://api.cloudinary.com/v1_1/${config.CLOUDINARY_CLOUD_NAME}/auto/upload`,
+    folder: normalizedFolder,
+    publicId,
+    resourceType: "auto",
+    signature: cloudinary.utils.api_sign_request(params, config.CLOUDINARY_API_SECRET),
+    timestamp,
+  };
+}
+
 function publicDocument<T extends Record<string, unknown>>(document: T): T {
   const { _id: _ignored, ...rest } = document;
   return rest as T;
@@ -47,7 +107,7 @@ export async function buildApp(
   await app.register(cookie, { secret: config.SESSION_SECRET });
   await app.register(cors, {
     origin: [config.FRONTEND_ORIGIN, "https://orange-league-control.vercel.app"],
-    credentials: true,
+    credentials: true 
   });
   await app.register(websocket);
 
@@ -98,23 +158,61 @@ export async function buildApp(
     return { user: request.authUser };
   });
 
+  app.post("/api/v1/media/signature", async (request, reply) => {
+    const parsed = z
+      .object({
+        folder: z.string().min(1).max(100).default(""),
+        name: z.string().min(1).max(255),
+      })
+      .safeParse(request.body);
+
+    if (!parsed.success) {
+      return reply.code(400).send({ error: "invalid_request", details: parsed.error.flatten() });
+    }
+
+    try {
+      return createCloudinaryUploadSignature(config, parsed.data.folder, parsed.data.name);
+    } catch (error) {
+      return reply.code(500).send({
+        error: "media_upload_failed",
+        details: error instanceof Error ? error.message : "unknown_error",
+      });
+    }
+  });
+
   app.post("/api/v1/media", async (request, reply) => {
-    if (!request.authUser) return reply.code(401).send({ error: "unauthorized" });
     const parsed = mediaSchema.safeParse(request.body);
     if (!parsed.success)
       return reply.code(400).send({ error: "invalid_request", details: parsed.error.flatten() });
 
-    const mediaId = crypto.randomUUID();
-    await database.db.collection("media").insertOne({
-      id: mediaId,
-      ownerId: request.authUser.id,
-      folder: parsed.data.folder,
-      name: parsed.data.name,
-      type: parsed.data.type,
-      data: parsed.data.data,
-      createdAt: new Date(),
-    });
-    return { id: mediaId, url: parsed.data.data };
+    try {
+      const secureUrl = await uploadMediaToCloudinary(
+        config,
+        parsed.data.data,
+        parsed.data.folder,
+        parsed.data.name,
+        parsed.data.type,
+      );
+
+      const mediaId = randomUUID();
+      const ownerId = request.authUser?.id ?? "public-upload";
+      await database.db.collection("media").insertOne({
+        id: mediaId,
+        ownerId,
+        folder: parsed.data.folder,
+        name: parsed.data.name,
+        type: parsed.data.type,
+        url: secureUrl,
+        createdAt: new Date(),
+      });
+
+      return { id: mediaId, url: secureUrl };
+    } catch (error) {
+      return reply.code(500).send({
+        error: "media_upload_failed",
+        details: error instanceof Error ? error.message : "unknown_error",
+      });
+    }
   });
 
   app.get<{ Params: { teamId: string } }>(

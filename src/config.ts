@@ -13,6 +13,10 @@ const environmentSchema = z.object({
   ADMIN_EMAIL: z.string().email().default("orange.admin@orangefirstdivision.com"),
   ADMIN_PASSWORD: z.string().min(8).default("OrangeFDL@2026!"),
   ADMIN_NAME: z.string().default("Orange League Admin"),
+  CLOUDINARY_CLOUD_NAME: z.string().default("l3mm8fkp"),
+  CLOUDINARY_API_KEY: z.string().default("634374367924969"),
+  CLOUDINARY_API_SECRET: z.string().default("21z7ropRyye-t_ES9XqTb7krSxQ"),
+  CLOUDINARY_FOLDER: z.string().default("orange-league"),
 });
 
 export type AppConfig = z.infer<typeof environmentSchema>;

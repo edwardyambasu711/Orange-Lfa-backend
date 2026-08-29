@@ -8,6 +8,7 @@ describe("loadConfig", () => {
     expect(config.MONGODB_DATABASE).toBe("orange_league");
     expect(config.API_PORT).toBe(4000);
     expect(config.NODE_ENV).toBe("development");
+    expect(config.CLOUDINARY_FOLDER).toBe("orange-league");
   });
 
   it("rejects an insecure session secret", () => {
