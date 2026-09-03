@@ -92,6 +92,13 @@ function publicDocument<T extends Record<string, unknown>>(document: T): T {
   return rest as T;
 }
 
+function publicTeamDocument<T extends Record<string, unknown>>(
+  document: T,
+): Omit<T, "loginEmail" | "loginPassword"> {
+  const { loginEmail: _loginEmail, loginPassword: _loginPassword, ...publicTeam } = publicDocument(document);
+  return publicTeam as Omit<T, "loginEmail" | "loginPassword">;
+}
+
 export async function syncDashboardNewsToSharedCollection(
   database: Database,
   teamId: string,
@@ -144,7 +151,10 @@ export async function buildApp(
       config.FRONTEND_ORIGIN,
       "https://orange-league-control.vercel.app",
       "https://test-lac-pi-18.vercel.app",
+      /^https:\/\/[a-z0-9-]+\.lovable\.app$/,
+      /^https:\/\/[a-z0-9-]+\.vercel\.app$/,
     ],
+    methods: ["GET", "HEAD", "POST", "PATCH", "DELETE", "OPTIONS"],
     credentials: true,
   });
   await app.register(websocket);
@@ -277,7 +287,7 @@ export async function buildApp(
       .find({ deletedAt: { $exists: false } })
       .limit(1000)
       .toArray();
-    return rows.map((row) => publicDocument(row));
+    return rows.map((row) => publicTeamDocument(row));
   });
 
   app.get("/api/v1/public/matches", async () => {
