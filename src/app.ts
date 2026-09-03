@@ -267,13 +267,28 @@ export async function buildApp(
   });
 
   app.get("/api/v1/public/news", async () => {
-    const rows = await database.db
-      .collection("news")
-      .find({ status: { $in: ["Published", "published"] }, deletedAt: { $exists: false } })
-      .sort({ publishedAt: -1 })
-      .limit(1000)
-      .toArray();
-    return rows.map((row) => publicDocument(row));
+    const dashboards = await database.db.collection("teamDashboards").find({}).toArray();
+
+    const rows = dashboards.flatMap((dashboard) => {
+      const data = (dashboard.data ?? {}) as Record<string, any>;
+      const items = Array.isArray(data.news) ? data.news : [];
+
+      return items
+        .filter((item) => item && (item.status === "Published" || item.status === "published"))
+        .map((item) => ({
+          ...item,
+          teamId: dashboard.teamId,
+          publishedAt: item.publishedAt ?? item.updatedAt ?? item.at ?? new Date().toISOString(),
+        }));
+    });
+
+    rows.sort((a, b) => {
+      const aDate = new Date(a.publishedAt ?? a.updatedAt ?? a.at ?? 0).getTime();
+      const bDate = new Date(b.publishedAt ?? b.updatedAt ?? b.at ?? 0).getTime();
+      return bDate - aDate;
+    });
+
+    return rows.slice(0, 1000).map((row) => publicDocument(row));
   });
 
   app.get<{
