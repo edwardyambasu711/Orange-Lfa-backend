@@ -99,6 +99,39 @@ function publicTeamDocument<T extends Record<string, unknown>>(
   return publicTeam as Omit<T, "loginEmail" | "loginPassword">;
 }
 
+function publicMatchDocument(
+  document: Record<string, unknown>,
+  homeTeam: Record<string, unknown> | undefined,
+  awayTeam: Record<string, unknown> | undefined,
+) {
+  const rawStatus = String(document.status ?? "scheduled").toLowerCase();
+  const kickoff = document.kickoff ? new Date(String(document.kickoff)) : null;
+  const hasStarted =
+    kickoff && !Number.isNaN(kickoff.getTime()) && kickoff.getTime() <= Date.now();
+  const status =
+    rawStatus === "scheduled" && hasStarted
+      ? "Live"
+      : rawStatus === "live" || rawStatus === "half_time"
+        ? "Live"
+        : rawStatus === "finished"
+          ? "Finished"
+          : "Scheduled";
+
+  return {
+    ...publicDocument(document),
+    home: document.home ?? homeTeam?.name ?? "TBD",
+    away: document.away ?? awayTeam?.name ?? "TBD",
+    homeLogo: document.homeLogo ?? homeTeam?.logo ?? homeTeam?.logoUrl ?? null,
+    awayLogo: document.awayLogo ?? awayTeam?.logo ?? awayTeam?.logoUrl ?? null,
+    venue: document.venue ?? document.stadium ?? "TBD",
+    status,
+    homeScore: Number(document.homeScore ?? document.home_score ?? 0),
+    awayScore: Number(document.awayScore ?? document.away_score ?? 0),
+    homeTeam: homeTeam ? publicTeamDocument(homeTeam) : null,
+    awayTeam: awayTeam ? publicTeamDocument(awayTeam) : null,
+  };
+}
+
 export async function syncDashboardNewsToSharedCollection(
   database: Database,
   teamId: string,
@@ -307,15 +340,7 @@ export async function buildApp(
     return rows.map((row) => {
       const homeTeam = teamsById.get(String(row.home_team_id ?? ""));
       const awayTeam = teamsById.get(String(row.away_team_id ?? ""));
-      return {
-        ...publicDocument(row),
-        home: row.home ?? homeTeam?.name ?? "TBD",
-        away: row.away ?? awayTeam?.name ?? "TBD",
-        homeLogo: row.homeLogo ?? homeTeam?.logo ?? homeTeam?.logoUrl ?? null,
-        awayLogo: row.awayLogo ?? awayTeam?.logo ?? awayTeam?.logoUrl ?? null,
-        homeTeam: homeTeam ? publicTeamDocument(homeTeam) : null,
-        awayTeam: awayTeam ? publicTeamDocument(awayTeam) : null,
-      };
+      return publicMatchDocument(row, homeTeam, awayTeam);
     });
   });
 
