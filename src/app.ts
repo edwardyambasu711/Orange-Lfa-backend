@@ -106,6 +106,15 @@ function publicMatchDocument(
 ) {
   const rawStatus = String(document.status ?? "scheduled").toLowerCase();
   const kickoff = document.kickoff ? new Date(String(document.kickoff)) : null;
+  const savedElapsedSeconds = Number(document.timerElapsedSeconds ?? document.timer_elapsed_seconds ?? 0);
+  const timerStartedAt = document.timerStartedAt ?? document.timer_started_at;
+  const startedAt = timerStartedAt ? new Date(String(timerStartedAt)).getTime() : 0;
+  const elapsedSeconds =
+    savedElapsedSeconds +
+    (document.timerRunning && startedAt > 0 ? Math.max(0, Math.floor((Date.now() - startedAt) / 1000)) : 0);
+  const injuryTime = Number(document.injuryTime ?? document.injury_time ?? 0);
+  const extraTime = Number(document.extraTime ?? document.extra_time ?? 0);
+  const extraTimeActive = Boolean(document.extraTimeActive ?? document.extra_time_active);
   const hasStarted =
     kickoff && !Number.isNaN(kickoff.getTime()) && kickoff.getTime() <= Date.now();
   const status =
@@ -127,6 +136,14 @@ function publicMatchDocument(
     status,
     homeScore: Number(document.homeScore ?? document.home_score ?? 0),
     awayScore: Number(document.awayScore ?? document.away_score ?? 0),
+    minute: Math.max(
+      Number(document.minute ?? 0),
+      Math.floor(elapsedSeconds / 60) + injuryTime + (extraTimeActive ? extraTime : 0),
+    ),
+    timerElapsedSeconds: elapsedSeconds,
+    injuryTime,
+    extraTime,
+    extraTimeActive,
     homeTeam: homeTeam ? publicTeamDocument(homeTeam) : null,
     awayTeam: awayTeam ? publicTeamDocument(awayTeam) : null,
   };
@@ -352,6 +369,42 @@ export async function buildApp(
       .limit(1000)
       .toArray();
     return rows.map((row) => publicDocument(row));
+  });
+
+  app.get("/api/v1/public/player-leaders", async () => {
+    const stats = await database.db.collection("match_player_statistics").find({}).toArray();
+    const playerIds = [...new Set(stats.map((stat) => String(stat.player_id ?? "")).filter(Boolean))];
+    const players = await database.db
+      .collection("players")
+      .find({ id: { $in: playerIds }, deletedAt: { $exists: false } })
+      .toArray();
+    const playersById = new Map(players.map((player) => [String(player.id), player]));
+    const totals = new Map<string, { goals: number; assists: number; cleanSheets: number }>();
+
+    for (const stat of stats) {
+      const playerId = String(stat.player_id ?? "");
+      if (!playerId) continue;
+      const total = totals.get(playerId) ?? { goals: 0, assists: 0, cleanSheets: 0 };
+      total.goals += Number(stat.goals ?? 0);
+      total.assists += Number(stat.assists ?? 0);
+      total.cleanSheets += Number(stat.clean_sheets ?? 0);
+      totals.set(playerId, total);
+    }
+
+    const leaders = (field: "goals" | "assists" | "cleanSheets") =>
+      [...totals.entries()]
+        .sort(([, a], [, b]) => b[field] - a[field])
+        .slice(0, 10)
+        .map(([playerId, total]) => ({
+          playerId,
+          playerName:
+            playersById.get(playerId)?.display_name ??
+            (`${playersById.get(playerId)?.first_name ?? ""} ${playersById.get(playerId)?.last_name ?? ""}`.trim() ||
+              "Unknown player"),
+          value: total[field],
+        }));
+
+    return { goals: leaders("goals"), assists: leaders("assists"), cleanSheets: leaders("cleanSheets") };
   });
 
   app.get("/api/v1/public/news", async () => {
