@@ -297,7 +297,26 @@ export async function buildApp(
       .sort({ kickoff: 1 })
       .limit(1000)
       .toArray();
-    return rows.map((row) => publicDocument(row));
+    const teamIds = rows.flatMap((row) => [row.home_team_id, row.away_team_id]).filter(Boolean);
+    const teams = await database.db
+      .collection("teams")
+      .find({ id: { $in: teamIds }, deletedAt: { $exists: false } })
+      .toArray();
+    const teamsById = new Map(teams.map((team) => [String(team.id), team]));
+
+    return rows.map((row) => {
+      const homeTeam = teamsById.get(String(row.home_team_id ?? ""));
+      const awayTeam = teamsById.get(String(row.away_team_id ?? ""));
+      return {
+        ...publicDocument(row),
+        home: row.home ?? homeTeam?.name ?? "TBD",
+        away: row.away ?? awayTeam?.name ?? "TBD",
+        homeLogo: row.homeLogo ?? homeTeam?.logo ?? homeTeam?.logoUrl ?? null,
+        awayLogo: row.awayLogo ?? awayTeam?.logo ?? awayTeam?.logoUrl ?? null,
+        homeTeam: homeTeam ? publicTeamDocument(homeTeam) : null,
+        awayTeam: awayTeam ? publicTeamDocument(awayTeam) : null,
+      };
+    });
   });
 
   app.get("/api/v1/public/standings", async () => {
