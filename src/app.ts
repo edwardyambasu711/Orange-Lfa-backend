@@ -361,6 +361,66 @@ export async function buildApp(
     });
   });
 
+  app.get<{ Params: { matchId: string } }>(
+    "/api/v1/public/matches/:matchId",
+    async (request, reply) => {
+      const match = await database.db.collection("matches").findOne({
+        id: request.params.matchId,
+        deletedAt: { $exists: false },
+      });
+      if (!match) return reply.code(404).send({ error: "not_found" });
+
+      const [teams, events, teamStatistics, playerStatistics] = await Promise.all([
+        database.db
+          .collection("teams")
+          .find({
+            id: { $in: [match.home_team_id, match.away_team_id].filter(Boolean) },
+            deletedAt: { $exists: false },
+          })
+          .toArray(),
+        database.db
+          .collection("match_events")
+          .find({ match_id: request.params.matchId, deletedAt: { $exists: false } })
+          .sort({ minute: 1, createdAt: 1 })
+          .toArray(),
+        database.db
+          .collection("match_statistics")
+          .find({ match_id: request.params.matchId, deletedAt: { $exists: false } })
+          .toArray(),
+        database.db
+          .collection("match_player_statistics")
+          .find({ match_id: request.params.matchId, deletedAt: { $exists: false } })
+          .toArray(),
+      ]);
+
+      const teamsById = new Map(teams.map((team) => [String(team.id), team]));
+      const playerIds = [...new Set(playerStatistics.map((stat) => String(stat.player_id ?? "")).filter(Boolean))];
+      const players = await database.db
+        .collection("players")
+        .find({ id: { $in: playerIds }, deletedAt: { $exists: false } })
+        .toArray();
+      const playersById = new Map(players.map((player) => [String(player.id), player]));
+      const publicMatch = publicMatchDocument(
+        match,
+        teamsById.get(String(match.home_team_id ?? "")),
+        teamsById.get(String(match.away_team_id ?? "")),
+      );
+
+      return {
+        match: publicMatch,
+        manOfTheMatch: match.manOfTheMatchPlayerId
+          ? publicDocument(playersById.get(String(match.manOfTheMatchPlayerId)) ?? {})
+          : null,
+        events: events.map((event) => publicDocument(event)),
+        teamStatistics: teamStatistics.map((stat) => publicDocument(stat)),
+        playerStatistics: playerStatistics.map((stat) => ({
+          ...publicDocument(stat),
+          player: publicDocument(playersById.get(String(stat.player_id ?? "")) ?? {}),
+        })),
+      };
+    },
+  );
+
   app.get("/api/v1/public/standings", async () => {
     const rows = await database.db
       .collection("standings")
