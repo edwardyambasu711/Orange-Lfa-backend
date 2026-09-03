@@ -92,6 +92,40 @@ function publicDocument<T extends Record<string, unknown>>(document: T): T {
   return rest as T;
 }
 
+export async function syncDashboardNewsToSharedCollection(
+  database: Database,
+  teamId: string,
+  dashboardData: Record<string, unknown>,
+): Promise<void> {
+  const items = Array.isArray((dashboardData as Record<string, any>).news)
+    ? ((dashboardData as Record<string, any>).news as Record<string, any>[])
+    : [];
+
+  for (const item of items) {
+    if (!item || typeof item !== "object") continue;
+
+    const record = {
+      ...item,
+      id: item.id ?? `news-${randomUUID()}`,
+      teamId,
+      author: item.author ?? "Unknown author",
+      status: item.status ?? "Draft",
+      publishedAt: item.publishedAt ?? item.updatedAt ?? item.at ?? new Date().toISOString(),
+      updatedAt: item.updatedAt ?? item.at ?? new Date().toISOString(),
+      createdAt: item.createdAt ?? new Date(),
+    };
+
+    await database.db.collection("news").updateOne(
+      { id: record.id },
+      {
+        $set: record,
+        $setOnInsert: { createdAt: record.createdAt },
+      },
+      { upsert: true },
+    );
+  }
+}
+
 declare module "fastify" {
   interface FastifyRequest {
     authUser: AuthUser | null;
@@ -267,9 +301,17 @@ export async function buildApp(
   });
 
   app.get("/api/v1/public/news", async () => {
-    const dashboards = await database.db.collection("teamDashboards").find({}).toArray();
+    const rows = await database.db
+      .collection("news")
+      .find({ status: { $in: ["Published", "published"] }, deletedAt: { $exists: false } })
+      .sort({ publishedAt: -1, createdAt: -1 })
+      .limit(1000)
+      .toArray();
 
-    const rows = dashboards.flatMap((dashboard) => {
+    if (rows.length > 0) return rows.map((row) => publicDocument(row));
+
+    const dashboards = await database.db.collection("teamDashboards").find({}).toArray();
+    const legacyRows = dashboards.flatMap((dashboard) => {
       const data = (dashboard.data ?? {}) as Record<string, any>;
       const items = Array.isArray(data.news) ? data.news : [];
 
@@ -282,13 +324,13 @@ export async function buildApp(
         }));
     });
 
-    rows.sort((a, b) => {
+    legacyRows.sort((a, b) => {
       const aDate = new Date(a.publishedAt ?? a.updatedAt ?? a.at ?? 0).getTime();
       const bDate = new Date(b.publishedAt ?? b.updatedAt ?? b.at ?? 0).getTime();
       return bDate - aDate;
     });
 
-    return rows.slice(0, 1000).map((row) => publicDocument(row));
+    return legacyRows.slice(0, 1000).map((row) => publicDocument(row));
   });
 
   app.get<{
@@ -414,6 +456,9 @@ export async function buildApp(
         },
         { upsert: true },
       );
+
+      await syncDashboardNewsToSharedCollection(database, teamId, data as Record<string, unknown>);
+
       await database.db
         .collection("auditLogs")
         .insertOne({ teamId, action, actor: request.authUser.email, createdAt: new Date() });
