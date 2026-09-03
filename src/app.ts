@@ -303,8 +303,15 @@ export async function buildApp(
   app.get("/api/v1/public/news", async () => {
     const rows = await database.db
       .collection("news")
-      .find({ status: { $in: ["Published", "published"] }, deletedAt: { $exists: false } })
-      .sort({ publishedAt: -1, createdAt: -1 })
+      .find({
+        deletedAt: { $exists: false },
+        $or: [
+          { status: { $in: ["Published", "published"] } },
+          { published_at: { $exists: true, $ne: null } },
+          { publishedAt: { $exists: true, $ne: null } },
+        ],
+      })
+      .sort({ published_at: -1, publishedAt: -1, createdAt: -1 })
       .limit(1000)
       .toArray();
 

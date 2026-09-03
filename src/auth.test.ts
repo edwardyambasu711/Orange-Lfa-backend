@@ -117,18 +117,16 @@ describe("public API routes", () => {
                   sort: () => ({
                     limit: () => ({
                       toArray: async () => {
-                        const publishedOnly = Array.isArray((filter as any)?.status?.$in)
+                        const publishedOnly = Array.isArray((filter as any)?.$or)
                           ? [
                               {
                                 id: "news-1",
                                 title: "League opener",
                                 summary: "Kickoff is tomorrow.",
-                                status: "Published",
-                                publishedAt: "2026-09-02T12:00:00.000Z",
-                                category: "General",
-                                author: "League Desk",
-                                featured: true,
-                                tags: ["launch"],
+                                published_at: "2026-09-02T12:00:00.000Z",
+                                category: "feature",
+                                team_id: null,
+                                body: "The season begins tomorrow.",
                               },
                             ]
                           : [];
@@ -159,12 +157,10 @@ describe("public API routes", () => {
         id: "news-1",
         title: "League opener",
         summary: "Kickoff is tomorrow.",
-        status: "Published",
-        publishedAt: "2026-09-02T12:00:00.000Z",
-        category: "General",
-        author: "League Desk",
-        featured: true,
-        tags: ["launch"],
+        published_at: "2026-09-02T12:00:00.000Z",
+        category: "feature",
+        team_id: null,
+        body: "The season begins tomorrow.",
       },
     ]);
   });
