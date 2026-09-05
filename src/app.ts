@@ -149,6 +149,31 @@ function publicMatchDocument(
   };
 }
 
+function aggregateTeamStatistics(rows: Record<string, any>[]) {
+  const grouped = new Map<string, Record<string, any>>();
+  for (const row of rows) {
+    const teamId = String(row.team_id ?? "");
+    if (!teamId) continue;
+    const aggregate = grouped.get(teamId) ?? { team_id: row.team_id, matches: 0 };
+    aggregate.matches += 1;
+    for (const [field, value] of Object.entries(row)) {
+      if (["_id", "id", "team_id", "match_id", "createdAt", "updatedAt"].includes(field)) continue;
+      if (typeof value !== "number" || !Number.isFinite(value)) continue;
+      aggregate[field] = Number(aggregate[field] ?? 0) + value;
+    }
+    grouped.set(teamId, aggregate);
+  }
+
+  return [...grouped.values()].map((aggregate) => {
+    if (aggregate.matches > 0) {
+      for (const field of ["possession", "pass_accuracy"]) {
+        if (typeof aggregate[field] === "number") aggregate[field] /= aggregate.matches;
+      }
+    }
+    return aggregate;
+  });
+}
+
 export async function syncDashboardNewsToSharedCollection(
   database: Database,
   teamId: string,
@@ -400,6 +425,15 @@ export async function buildApp(
         .find({ id: { $in: playerIds }, deletedAt: { $exists: false } })
         .toArray();
       const playersById = new Map(players.map((player) => [String(player.id), player]));
+      const generatedTeamStatistics = aggregateTeamStatistics(
+        await database.db
+          .collection("match_statistics")
+          .find({ team_id: { $in: [match.home_team_id, match.away_team_id].filter(Boolean) }, deletedAt: { $exists: false } })
+          .toArray(),
+      ).map((stat) => ({
+        ...stat,
+        team: publicDocument(teamsById.get(String(stat.team_id)) ?? {}),
+      }));
       const publicMatch = publicMatchDocument(
         match,
         teamsById.get(String(match.home_team_id ?? "")),
@@ -413,6 +447,7 @@ export async function buildApp(
           : null,
         events: events.map((event) => publicDocument(event)),
         teamStatistics: teamStatistics.map((stat) => publicDocument(stat)),
+        generatedTeamStatistics,
         playerStatistics: playerStatistics.map((stat) => ({
           ...publicDocument(stat),
           player: publicDocument(playersById.get(String(stat.player_id ?? "")) ?? {}),
@@ -420,6 +455,22 @@ export async function buildApp(
       };
     },
   );
+
+  app.get("/api/v1/public/team-statistics", async () => {
+    const rows = await database.db
+      .collection("match_statistics")
+      .find({ deletedAt: { $exists: false } })
+      .toArray();
+    const teams = await database.db
+      .collection("teams")
+      .find({ deletedAt: { $exists: false } })
+      .toArray();
+    const teamsById = new Map(teams.map((team) => [String(team.id), team]));
+    return aggregateTeamStatistics(rows).map((stat) => ({
+      ...stat,
+      team: publicDocument(teamsById.get(String(stat.team_id)) ?? {}),
+    }));
+  });
 
   app.get("/api/v1/public/standings", async () => {
     const rows = await database.db
