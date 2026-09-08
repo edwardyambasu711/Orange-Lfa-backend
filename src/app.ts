@@ -10,6 +10,7 @@ import {
   createSession,
   getSessionUser,
   hashSessionToken,
+  provisionTeamUser,
   type AuthUser,
 } from "./auth.js";
 import { loadConfig, type AppConfig } from "./config.js";
@@ -112,6 +113,7 @@ function normalizeTeamForm(value: unknown): string[] {
 type DerivedStanding = {
   team_id: string;
   team: string;
+  logoUrl: string | null;
   played: number;
   won: number;
   drawn: number;
@@ -135,6 +137,7 @@ function deriveStandingsFromMatches(
     rows.set(teamId, {
       team_id: teamId,
       team: String(team.name ?? team.displayName ?? team.display_name ?? "TBD"),
+      logoUrl: String(team.logoUrl ?? team.logo_url ?? team.logo ?? "") || null,
       played: 0,
       won: 0,
       drawn: 0,
@@ -794,6 +797,14 @@ export async function buildApp(
         updatedAt: now,
       };
       await database.db.collection(resource.data).insertOne(document);
+      if (resource.data === "teams") {
+        await provisionTeamUser(database, {
+          id: String(document.id),
+          name: String(document.name ?? "Team admin"),
+          loginEmail: String(document.loginEmail ?? document.login_email ?? ""),
+          loginPassword: String(document.loginPassword ?? document.login_password ?? ""),
+        });
+      }
       return reply.code(201).send(publicDocument(document));
     },
   );

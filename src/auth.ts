@@ -17,6 +17,30 @@ export type AuthUser = {
 
 type UserDocument = AuthUser & { passwordHash: string; createdAt: Date; updatedAt: Date };
 
+export async function provisionTeamUser(
+  database: Database,
+  team: { id: string; name: string; loginEmail: string; loginPassword: string },
+): Promise<void> {
+  const email = team.loginEmail.trim().toLowerCase();
+  if (!email || !team.loginPassword) return;
+
+  await database.db.collection<UserDocument>("users").updateOne(
+    { email },
+    {
+      $set: {
+        email,
+        fullName: team.name,
+        roles: ["team_admin"],
+        teamId: team.id,
+        passwordHash: await bcrypt.hash(team.loginPassword, 12),
+        updatedAt: new Date(),
+      },
+      $setOnInsert: { id: randomBytes(16).toString("hex"), createdAt: new Date() },
+    },
+    { upsert: true },
+  );
+}
+
 export function hashSessionToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
@@ -106,7 +130,21 @@ export async function authenticateUser(
   const user = await database.db
     .collection<UserDocument>("users")
     .findOne({ email: email.toLowerCase() });
-  if (!user || !(await bcrypt.compare(password, user.passwordHash))) return null;
+  if (!user) {
+    const team = await database.db.collection<Record<string, unknown>>("teams").findOne({
+      loginEmail: email.toLowerCase(),
+      deletedAt: { $exists: false },
+    });
+    if (!team || team.loginPassword !== password) return null;
+    await provisionTeamUser(database, {
+      id: String(team.id),
+      name: String(team.name ?? "Team admin"),
+      loginEmail: String(team.loginEmail),
+      loginPassword: String(team.loginPassword),
+    });
+    return authenticateUser(database, email, password);
+  }
+  if (!(await bcrypt.compare(password, user.passwordHash))) return null;
   return {
     id: user.id,
     email: user.email,
