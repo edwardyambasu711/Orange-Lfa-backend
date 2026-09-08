@@ -99,10 +99,22 @@ function publicTeamDocument<T extends Record<string, unknown>>(
   return publicTeam as Omit<T, "loginEmail" | "loginPassword">;
 }
 
+function normalizeTeamForm(value: unknown): string[] {
+  const raw = String(value ?? "").trim();
+  if (!raw) return [];
+
+  return [...raw]
+    .map((char) => char.toUpperCase())
+    .filter((char) => /[WDL]/.test(char))
+    .slice(-5);
+}
+
 function publicMatchDocument(
   document: Record<string, unknown>,
   homeTeam: Record<string, unknown> | undefined,
   awayTeam: Record<string, unknown> | undefined,
+  homeForm: string[] = [],
+  awayForm: string[] = [],
 ) {
   const rawStatus = String(document.status ?? "scheduled").toLowerCase();
   const kickoff = document.kickoff ? new Date(String(document.kickoff)) : null;
@@ -136,6 +148,8 @@ function publicMatchDocument(
     status,
     homeScore: Number(document.homeScore ?? document.home_score ?? 0),
     awayScore: Number(document.awayScore ?? document.away_score ?? 0),
+    homeForm: homeForm.length > 0 ? homeForm : normalizeTeamForm(document.homeForm ?? document.home_form),
+    awayForm: awayForm.length > 0 ? awayForm : normalizeTeamForm(document.awayForm ?? document.away_form),
     minute: Math.max(
       Number(document.minute ?? 0),
       Math.floor(elapsedSeconds / 60) + injuryTime + (extraTimeActive ? extraTime : 0),
@@ -373,16 +387,25 @@ export async function buildApp(
       .limit(1000)
       .toArray();
     const teamIds = rows.flatMap((row) => [row.home_team_id, row.away_team_id]).filter(Boolean);
-    const teams = await database.db
-      .collection("teams")
-      .find({ id: { $in: teamIds }, deletedAt: { $exists: false } })
-      .toArray();
+    const [teams, standings] = await Promise.all([
+      database.db
+        .collection("teams")
+        .find({ id: { $in: teamIds }, deletedAt: { $exists: false } })
+        .toArray(),
+      database.db
+        .collection("league_standings")
+        .find({ team_id: { $in: teamIds }, deletedAt: { $exists: false } })
+        .toArray(),
+    ]);
     const teamsById = new Map(teams.map((team) => [String(team.id), team]));
+    const standingsById = new Map(standings.map((standing) => [String(standing.team_id), standing]));
 
     return rows.map((row) => {
       const homeTeam = teamsById.get(String(row.home_team_id ?? ""));
       const awayTeam = teamsById.get(String(row.away_team_id ?? ""));
-      return publicMatchDocument(row, homeTeam, awayTeam);
+      const homeForm = normalizeTeamForm(standingsById.get(String(row.home_team_id ?? ""))?.form);
+      const awayForm = normalizeTeamForm(standingsById.get(String(row.away_team_id ?? ""))?.form);
+      return publicMatchDocument(row, homeTeam, awayTeam, homeForm, awayForm);
     });
   });
 
@@ -395,7 +418,7 @@ export async function buildApp(
       });
       if (!match) return reply.code(404).send({ error: "not_found" });
 
-      const [teams, events, teamStatistics, playerStatistics] = await Promise.all([
+      const [teams, events, teamStatistics, playerStatistics, lineups, standings] = await Promise.all([
         database.db
           .collection("teams")
           .find({
@@ -416,10 +439,25 @@ export async function buildApp(
           .collection("match_player_statistics")
           .find({ match_id: request.params.matchId, deletedAt: { $exists: false } })
           .toArray(),
+        database.db
+          .collection("match_lineups")
+          .find({ match_id: request.params.matchId, deletedAt: { $exists: false } })
+          .sort({ is_starter: -1, minutes_played: -1, shirt_number: 1 })
+          .toArray(),
+        database.db
+          .collection("league_standings")
+          .find({ team_id: { $in: [match.home_team_id, match.away_team_id].filter(Boolean) }, deletedAt: { $exists: false } })
+          .toArray(),
       ]);
 
       const teamsById = new Map(teams.map((team) => [String(team.id), team]));
-      const playerIds = [...new Set(playerStatistics.map((stat) => String(stat.player_id ?? "")).filter(Boolean))];
+      const standingsById = new Map(standings.map((standing) => [String(standing.team_id), standing]));
+      const playerIds = [
+        ...new Set([
+          ...playerStatistics.map((stat) => String(stat.player_id ?? "")).filter(Boolean),
+          ...lineups.map((lineup) => String(lineup.player_id ?? "")).filter(Boolean),
+        ]),
+      ];
       const players = await database.db
         .collection("players")
         .find({ id: { $in: playerIds }, deletedAt: { $exists: false } })
@@ -438,6 +476,8 @@ export async function buildApp(
         match,
         teamsById.get(String(match.home_team_id ?? "")),
         teamsById.get(String(match.away_team_id ?? "")),
+        normalizeTeamForm(standingsById.get(String(match.home_team_id ?? ""))?.form),
+        normalizeTeamForm(standingsById.get(String(match.away_team_id ?? ""))?.form),
       );
 
       return {
@@ -451,6 +491,11 @@ export async function buildApp(
         playerStatistics: playerStatistics.map((stat) => ({
           ...publicDocument(stat),
           player: publicDocument(playersById.get(String(stat.player_id ?? "")) ?? {}),
+        })),
+        lineups: lineups.map((lineup) => ({
+          ...publicDocument(lineup),
+          team: publicDocument(teamsById.get(String(lineup.team_id ?? "")) ?? {}),
+          player: publicDocument(playersById.get(String(lineup.player_id ?? "")) ?? {}),
         })),
       };
     },
@@ -516,6 +561,35 @@ export async function buildApp(
         }));
 
     return { goals: leaders("goals"), assists: leaders("assists"), cleanSheets: leaders("cleanSheets") };
+  });
+
+  app.get("/api/v1/public/top-goal-scorer", async () => {
+    const stats = await database.db.collection("match_player_statistics").find({}).toArray();
+    const playerIds = [...new Set(stats.map((stat) => String(stat.player_id ?? "")).filter(Boolean))];
+    const players = await database.db
+      .collection("players")
+      .find({ id: { $in: playerIds }, deletedAt: { $exists: false } })
+      .toArray();
+    const playersById = new Map(players.map((player) => [String(player.id), player]));
+    const totals = new Map<string, number>();
+
+    for (const stat of stats) {
+      const playerId = String(stat.player_id ?? "");
+      if (!playerId) continue;
+      totals.set(playerId, (totals.get(playerId) ?? 0) + Number(stat.goals ?? 0));
+    }
+
+    const [playerId, totalGoals] = [...totals.entries()].sort(([, a], [, b]) => b - a)[0] ?? [];
+    if (!playerId) return null;
+
+    return {
+      playerId,
+      playerName:
+        playersById.get(playerId)?.display_name ??
+        (`${playersById.get(playerId)?.first_name ?? ""} ${playersById.get(playerId)?.last_name ?? ""}`.trim() ||
+          "Unknown player"),
+      value: Number(totalGoals ?? 0),
+    };
   });
 
   app.get("/api/v1/public/news", async () => {
