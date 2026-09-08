@@ -109,6 +109,114 @@ function normalizeTeamForm(value: unknown): string[] {
     .slice(-5);
 }
 
+type DerivedStanding = {
+  team_id: string;
+  team: string;
+  played: number;
+  won: number;
+  drawn: number;
+  lost: number;
+  points: number;
+  goals_for: number;
+  goals_against: number;
+  goal_difference: number;
+  form: string;
+};
+
+function deriveStandingsFromMatches(
+  matches: Record<string, any>[],
+  teams: Record<string, any>[],
+): DerivedStanding[] {
+  const rows = new Map<string, DerivedStanding>();
+  const forms = new Map<string, string[]>();
+  for (const team of teams) {
+    const teamId = String(team.id ?? team._id ?? "");
+    if (!teamId) continue;
+    rows.set(teamId, {
+      team_id: teamId,
+      team: String(team.name ?? team.displayName ?? team.display_name ?? "TBD"),
+      played: 0,
+      won: 0,
+      drawn: 0,
+      lost: 0,
+      points: 0,
+      goals_for: 0,
+      goals_against: 0,
+      goal_difference: 0,
+      form: "",
+    });
+    forms.set(teamId, []);
+  }
+
+  for (const match of [...matches].sort((a, b) => String(a.kickoff ?? "").localeCompare(String(b.kickoff ?? "")))) {
+    if (String(match.status ?? "").toLowerCase() !== "finished") continue;
+    const homeId = String(match.home_team_id ?? "");
+    const awayId = String(match.away_team_id ?? "");
+    const home = rows.get(homeId);
+    const away = rows.get(awayId);
+    const homeScore = Number(match.homeScore ?? match.home_score);
+    const awayScore = Number(match.awayScore ?? match.away_score);
+    if (!home || !away || !Number.isFinite(homeScore) || !Number.isFinite(awayScore)) continue;
+
+    home.played += 1;
+    away.played += 1;
+    home.goals_for += homeScore;
+    home.goals_against += awayScore;
+    away.goals_for += awayScore;
+    away.goals_against += homeScore;
+    const homeResult = homeScore > awayScore ? "W" : homeScore === awayScore ? "D" : "L";
+    const awayResult = homeResult === "W" ? "L" : homeResult === "L" ? "W" : "D";
+    forms.get(homeId)?.push(homeResult);
+    forms.get(awayId)?.push(awayResult);
+    if (homeResult === "W") {
+      home.won += 1;
+      home.points += 3;
+      away.lost += 1;
+    } else if (homeResult === "L") {
+      away.won += 1;
+      away.points += 3;
+      home.lost += 1;
+    } else {
+      home.drawn += 1;
+      away.drawn += 1;
+      home.points += 1;
+      away.points += 1;
+    }
+  }
+
+  return [...rows.values()]
+    .map((row) => ({
+      ...row,
+      goal_difference: row.goals_for - row.goals_against,
+      form: (forms.get(row.team_id) ?? []).slice(-5).join(""),
+    }))
+    .sort(
+      (a, b) =>
+        b.points - a.points ||
+        b.goal_difference - a.goal_difference ||
+        b.goals_for - a.goals_for ||
+        a.team.localeCompare(b.team),
+    )
+    .map((row, index) => ({ ...row, position: index + 1 }));
+}
+
+function deriveFormFromMatches(matches: Record<string, any>[], teamId: unknown): string[] {
+  const form: string[] = [];
+  const targetId = String(teamId ?? "");
+  for (const match of [...matches].sort((a, b) => String(a.kickoff ?? "").localeCompare(String(b.kickoff ?? "")))) {
+    if (String(match.status ?? "").toLowerCase() !== "finished") continue;
+    const homeScore = Number(match.homeScore ?? match.home_score);
+    const awayScore = Number(match.awayScore ?? match.away_score);
+    if (!Number.isFinite(homeScore) || !Number.isFinite(awayScore)) continue;
+    if (String(match.home_team_id ?? "") === targetId) {
+      form.push(homeScore > awayScore ? "W" : homeScore === awayScore ? "D" : "L");
+    } else if (String(match.away_team_id ?? "") === targetId) {
+      form.push(awayScore > homeScore ? "W" : awayScore === homeScore ? "D" : "L");
+    }
+  }
+  return form.slice(-5);
+}
+
 function publicMatchDocument(
   document: Record<string, unknown>,
   homeTeam: Record<string, unknown> | undefined,
@@ -387,18 +495,16 @@ export async function buildApp(
       .limit(1000)
       .toArray();
     const teamIds = rows.flatMap((row) => [row.home_team_id, row.away_team_id]).filter(Boolean);
-    const [teams, standings] = await Promise.all([
+    const [teams] = await Promise.all([
       database.db
         .collection("teams")
         .find({ id: { $in: teamIds }, deletedAt: { $exists: false } })
         .toArray(),
-      database.db
-        .collection("league_standings")
-        .find({ team_id: { $in: teamIds }, deletedAt: { $exists: false } })
-        .toArray(),
     ]);
     const teamsById = new Map(teams.map((team) => [String(team.id), team]));
-    const standingsById = new Map(standings.map((standing) => [String(standing.team_id), standing]));
+    const standingsById = new Map(
+      deriveStandingsFromMatches(rows, teams).map((standing) => [String(standing.team_id), standing]),
+    );
 
     return rows.map((row) => {
       const homeTeam = teamsById.get(String(row.home_team_id ?? ""));
@@ -452,6 +558,17 @@ export async function buildApp(
 
       const teamsById = new Map(teams.map((team) => [String(team.id), team]));
       const standingsById = new Map(standings.map((standing) => [String(standing.team_id), standing]));
+      let homeForm = normalizeTeamForm(standingsById.get(String(match.home_team_id ?? ""))?.form);
+      let awayForm = normalizeTeamForm(standingsById.get(String(match.away_team_id ?? ""))?.form);
+      const matchesCollection = database.db.collection("matches");
+      if (typeof matchesCollection.find === "function") {
+        const allMatches = await matchesCollection
+          .find({ deletedAt: { $exists: false } })
+          .limit(1000)
+          .toArray();
+        homeForm = deriveFormFromMatches(allMatches, match.home_team_id);
+        awayForm = deriveFormFromMatches(allMatches, match.away_team_id);
+      }
       const playerIds = [
         ...new Set([
           ...playerStatistics.map((stat) => String(stat.player_id ?? "")).filter(Boolean),
@@ -476,8 +593,8 @@ export async function buildApp(
         match,
         teamsById.get(String(match.home_team_id ?? "")),
         teamsById.get(String(match.away_team_id ?? "")),
-        normalizeTeamForm(standingsById.get(String(match.home_team_id ?? ""))?.form),
-        normalizeTeamForm(standingsById.get(String(match.away_team_id ?? ""))?.form),
+        homeForm,
+        awayForm,
       );
 
       return {
@@ -518,13 +635,11 @@ export async function buildApp(
   });
 
   app.get("/api/v1/public/standings", async () => {
-    const rows = await database.db
-      .collection("standings")
-      .find({ deletedAt: { $exists: false } })
-      .sort({ position: 1 })
-      .limit(1000)
-      .toArray();
-    return rows.map((row) => publicDocument(row));
+    const [matches, teams] = await Promise.all([
+      database.db.collection("matches").find({ deletedAt: { $exists: false } }).limit(1000).toArray(),
+      database.db.collection("teams").find({ deletedAt: { $exists: false } }).limit(1000).toArray(),
+    ]);
+    return deriveStandingsFromMatches(matches, teams).map((row) => publicDocument(row));
   });
 
   app.get("/api/v1/public/player-leaders", async () => {
