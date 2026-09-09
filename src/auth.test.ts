@@ -278,8 +278,23 @@ describe("public API routes", () => {
               return {
                 find: () => ({
                   toArray: async () => [
-                    { id: "player-1", display_name: "Ada Stone", logo_url: "https://example.com/ada.png" },
+                    { id: "player-1", display_name: "Ada Stone" },
                     { id: "player-2", display_name: "Kofi Mensah", logoUrl: "https://example.com/kofi.png" },
+                  ],
+                }),
+              };
+            }
+            if (name === "teamDashboards") {
+              return {
+                find: () => ({
+                  toArray: async () => [
+                    {
+                      data: {
+                        playerProfiles: {
+                          "player-1": { photoUrl: "https://example.com/ada.png" },
+                        },
+                      },
+                    },
                   ],
                 }),
               };

@@ -299,6 +299,24 @@ function aggregateTeamStatistics(rows: Record<string, any>[]) {
   });
 }
 
+async function getPlayerPhotoUrls(database: Database, playerIds: string[]): Promise<Map<string, string>> {
+  const photoUrls = new Map<string, string>();
+  const dashboards = await database.db.collection("teamDashboards").find({}).toArray();
+
+  for (const dashboard of dashboards) {
+    const profiles = (dashboard.data as Record<string, any> | undefined)?.playerProfiles;
+    if (!profiles || typeof profiles !== "object") continue;
+
+    for (const playerId of playerIds) {
+      const profile = profiles[playerId];
+      const photoUrl = profile?.photoUrl ?? profile?.photo_url ?? profile?.logoUrl ?? profile?.logo_url;
+      if (photoUrl) photoUrls.set(playerId, String(photoUrl));
+    }
+  }
+
+  return photoUrls;
+}
+
 export async function syncDashboardNewsToSharedCollection(
   database: Database,
   teamId: string,
@@ -673,6 +691,7 @@ export async function buildApp(
       .find({ id: { $in: playerIds }, deletedAt: { $exists: false } })
       .toArray();
     const playersById = new Map(players.map((player) => [String(player.id), player]));
+    const playerPhotoUrls = await getPlayerPhotoUrls(database, playerIds);
     const totals = new Map<string, { goals: number; assists: number; cleanSheets: number }>();
 
     for (const stat of stats) {
@@ -696,7 +715,13 @@ export async function buildApp(
             playerName:
               player?.display_name ??
               (`${player?.first_name ?? ""} ${player?.last_name ?? ""}`.trim() || "Unknown player"),
-            logoUrl: player?.logoUrl ?? player?.logo_url ?? null,
+            logoUrl:
+              player?.logoUrl ??
+              player?.logo_url ??
+              player?.photoUrl ??
+              player?.photo_url ??
+              playerPhotoUrls.get(playerId) ??
+              null,
             value: total[field],
           };
         });
@@ -712,6 +737,7 @@ export async function buildApp(
       .find({ id: { $in: playerIds }, deletedAt: { $exists: false } })
       .toArray();
     const playersById = new Map(players.map((player) => [String(player.id), player]));
+    const playerPhotoUrls = await getPlayerPhotoUrls(database, playerIds);
     const totals = new Map<string, number>();
 
     for (const stat of stats) {
@@ -729,7 +755,13 @@ export async function buildApp(
       playerName:
         player?.display_name ??
         (`${player?.first_name ?? ""} ${player?.last_name ?? ""}`.trim() || "Unknown player"),
-      logoUrl: player?.logoUrl ?? player?.logo_url ?? null,
+      logoUrl:
+        player?.logoUrl ??
+        player?.logo_url ??
+        player?.photoUrl ??
+        player?.photo_url ??
+        playerPhotoUrls.get(playerId) ??
+        null,
       value: Number(totalGoals ?? 0),
     };
   });
