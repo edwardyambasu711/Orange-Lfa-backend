@@ -299,17 +299,38 @@ function aggregateTeamStatistics(rows: Record<string, any>[]) {
   });
 }
 
-async function getPlayerPhotoUrls(database: Database, playerIds: string[]): Promise<Map<string, string>> {
+async function getPlayerPhotoUrls(
+  database: Database,
+  players: Record<string, any>[],
+): Promise<Map<string, string>> {
   const photoUrls = new Map<string, string>();
   const dashboards = await database.db.collection("teamDashboards").find({}).toArray();
 
   for (const dashboard of dashboards) {
-    const profiles = (dashboard.data as Record<string, any> | undefined)?.playerProfiles;
+    const data = (dashboard.data as Record<string, any> | undefined) ?? {};
+    const profiles = data.playerProfiles;
+    const roster = Array.isArray(data.players) ? data.players : [];
     if (!profiles || typeof profiles !== "object") continue;
 
-    for (const playerId of playerIds) {
+    for (const player of players) {
+      const playerId = String(player.id ?? "");
       const profile = profiles[playerId];
-      const photoUrl = profile?.photoUrl ?? profile?.photo_url ?? profile?.logoUrl ?? profile?.logo_url;
+      const matchedRosterPlayer = roster.find(
+        (rosterPlayer: Record<string, any>) =>
+          String(rosterPlayer.id ?? "") === playerId ||
+          String(rosterPlayer.name ?? "").trim().toLowerCase() ===
+            String(player.display_name ?? `${player.first_name ?? ""} ${player.last_name ?? ""}`).trim().toLowerCase(),
+      );
+      const matchedProfile = matchedRosterPlayer ? profiles[String(matchedRosterPlayer.id)] : undefined;
+      const photoUrl =
+        profile?.photoUrl ??
+        profile?.photo_url ??
+        profile?.logoUrl ??
+        profile?.logo_url ??
+        matchedProfile?.photoUrl ??
+        matchedProfile?.photo_url ??
+        matchedProfile?.logoUrl ??
+        matchedProfile?.logo_url;
       if (photoUrl) photoUrls.set(playerId, String(photoUrl));
     }
   }
@@ -691,7 +712,7 @@ export async function buildApp(
       .find({ id: { $in: playerIds }, deletedAt: { $exists: false } })
       .toArray();
     const playersById = new Map(players.map((player) => [String(player.id), player]));
-    const playerPhotoUrls = await getPlayerPhotoUrls(database, playerIds);
+    const playerPhotoUrls = await getPlayerPhotoUrls(database, players);
     const totals = new Map<string, { goals: number; assists: number; cleanSheets: number }>();
 
     for (const stat of stats) {
@@ -737,7 +758,7 @@ export async function buildApp(
       .find({ id: { $in: playerIds }, deletedAt: { $exists: false } })
       .toArray();
     const playersById = new Map(players.map((player) => [String(player.id), player]));
-    const playerPhotoUrls = await getPlayerPhotoUrls(database, playerIds);
+    const playerPhotoUrls = await getPlayerPhotoUrls(database, players);
     const totals = new Map<string, number>();
 
     for (const stat of stats) {

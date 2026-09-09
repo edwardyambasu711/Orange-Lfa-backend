@@ -290,8 +290,9 @@ describe("public API routes", () => {
                   toArray: async () => [
                     {
                       data: {
+                        players: [{ id: "roster-player-1", name: "Ada Stone" }],
                         playerProfiles: {
-                          "player-1": { photoUrl: "https://example.com/ada.png" },
+                          "roster-player-1": { photoUrl: "https://example.com/ada.png" },
                         },
                       },
                     },
