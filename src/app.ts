@@ -518,6 +518,26 @@ export async function buildApp(
     });
   });
 
+  app.get("/api/v1/public/players", async () => {
+    const players = await database.db
+      .collection("players")
+      .find({ deletedAt: { $exists: false } })
+      .limit(1000)
+      .toArray();
+
+    return players.map((player) => publicDocument(player));
+  });
+
+  app.get<{ Params: { playerId: string } }>("/api/v1/public/players/:playerId", async (request, reply) => {
+    const player = await database.db.collection("players").findOne({
+      id: request.params.playerId,
+      deletedAt: { $exists: false },
+    });
+    if (!player) return reply.code(404).send({ error: "not_found" });
+
+    return { player: publicDocument(player) };
+  });
+
   app.get<{ Params: { matchId: string } }>(
     "/api/v1/public/matches/:matchId",
     async (request, reply) => {
@@ -669,14 +689,17 @@ export async function buildApp(
       [...totals.entries()]
         .sort(([, a], [, b]) => b[field] - a[field])
         .slice(0, 10)
-        .map(([playerId, total]) => ({
-          playerId,
-          playerName:
-            playersById.get(playerId)?.display_name ??
-            (`${playersById.get(playerId)?.first_name ?? ""} ${playersById.get(playerId)?.last_name ?? ""}`.trim() ||
-              "Unknown player"),
-          value: total[field],
-        }));
+        .map(([playerId, total]) => {
+          const player = playersById.get(playerId);
+          return {
+            playerId,
+            playerName:
+              player?.display_name ??
+              (`${player?.first_name ?? ""} ${player?.last_name ?? ""}`.trim() || "Unknown player"),
+            logoUrl: player?.logoUrl ?? player?.logo_url ?? null,
+            value: total[field],
+          };
+        });
 
     return { goals: leaders("goals"), assists: leaders("assists"), cleanSheets: leaders("cleanSheets") };
   });
@@ -699,13 +722,14 @@ export async function buildApp(
 
     const [playerId, totalGoals] = [...totals.entries()].sort(([, a], [, b]) => b - a)[0] ?? [];
     if (!playerId) return null;
+    const player = playersById.get(playerId);
 
     return {
       playerId,
       playerName:
-        playersById.get(playerId)?.display_name ??
-        (`${playersById.get(playerId)?.first_name ?? ""} ${playersById.get(playerId)?.last_name ?? ""}`.trim() ||
-          "Unknown player"),
+        player?.display_name ??
+        (`${player?.first_name ?? ""} ${player?.last_name ?? ""}`.trim() || "Unknown player"),
+      logoUrl: player?.logoUrl ?? player?.logo_url ?? null,
       value: Number(totalGoals ?? 0),
     };
   });

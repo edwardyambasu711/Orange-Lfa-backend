@@ -165,6 +165,156 @@ describe("public API routes", () => {
     ]);
   });
 
+  it("fetches a public player by id and returns not found for missing players", async () => {
+    const app = await buildApp(
+      {
+        client: {} as any,
+        db: {
+          command: async () => ({ ok: 1 }),
+          collection: (name: string) => {
+            if (name === "players") {
+              return {
+                findOne: async (filter: Record<string, unknown>) =>
+                  filter.id === "player-1"
+                    ? {
+                        _id: "internal-id",
+                        id: "player-1",
+                        display_name: "Ada Stone",
+                        first_name: "Ada",
+                        last_name: "Stone",
+                      }
+                    : null,
+              };
+            }
+
+            return {
+              find: () => ({
+                toArray: async () => [],
+              }),
+            };
+          },
+        },
+      } as any,
+      loadConfig({ SESSION_SECRET: "local-development-session-secret-change-me" }),
+    );
+
+    const found = await app.inject({ method: "GET", url: "/api/v1/public/players/player-1" });
+    expect(found.statusCode).toBe(200);
+    expect(found.json()).toEqual({
+      player: {
+        id: "player-1",
+        display_name: "Ada Stone",
+        first_name: "Ada",
+        last_name: "Stone",
+      },
+    });
+
+    const missing = await app.inject({ method: "GET", url: "/api/v1/public/players/missing" });
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json()).toEqual({ error: "not_found" });
+  });
+
+  it("lists public players without soft-deleted records", async () => {
+    const app = await buildApp(
+      {
+        client: {} as any,
+        db: {
+          command: async () => ({ ok: 1 }),
+          collection: (name: string) => {
+            if (name === "players") {
+              return {
+                find: (filter: Record<string, unknown>) => {
+                  expect(filter).toEqual({ deletedAt: { $exists: false } });
+                  return {
+                    limit: () => ({
+                      toArray: async () => [
+                        { _id: "internal-id", id: "player-1", display_name: "Ada Stone" },
+                        { id: "player-2", display_name: "Kofi Mensah" },
+                      ],
+                    }),
+                  };
+                },
+              };
+            }
+
+            return {
+              find: () => ({
+                toArray: async () => [],
+              }),
+            };
+          },
+        },
+      } as any,
+      loadConfig({ SESSION_SECRET: "local-development-session-secret-change-me" }),
+    );
+
+    const response = await app.inject({ method: "GET", url: "/api/v1/public/players" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual([
+      { id: "player-1", display_name: "Ada Stone" },
+      { id: "player-2", display_name: "Kofi Mensah" },
+    ]);
+  });
+
+  it("includes player logo URLs in leaders and top scorer responses", async () => {
+    const app = await buildApp(
+      {
+        client: {} as any,
+        db: {
+          command: async () => ({ ok: 1 }),
+          collection: (name: string) => {
+            if (name === "match_player_statistics") {
+              return {
+                find: () => ({
+                  toArray: async () => [
+                    { player_id: "player-1", goals: 4, assists: 2, clean_sheets: 1 },
+                    { player_id: "player-2", goals: 1, assists: 3, clean_sheets: 0 },
+                  ],
+                }),
+              };
+            }
+            if (name === "players") {
+              return {
+                find: () => ({
+                  toArray: async () => [
+                    { id: "player-1", display_name: "Ada Stone", logo_url: "https://example.com/ada.png" },
+                    { id: "player-2", display_name: "Kofi Mensah", logoUrl: "https://example.com/kofi.png" },
+                  ],
+                }),
+              };
+            }
+
+            return {
+              find: () => ({
+                toArray: async () => [],
+              }),
+            };
+          },
+        },
+      } as any,
+      loadConfig({ SESSION_SECRET: "local-development-session-secret-change-me" }),
+    );
+
+    const leaders = await app.inject({ method: "GET", url: "/api/v1/public/player-leaders" });
+    expect(leaders.statusCode).toBe(200);
+    expect(leaders.json()).toEqual(expect.objectContaining({
+      goals: expect.arrayContaining([
+        { playerId: "player-1", logoUrl: "https://example.com/ada.png", playerName: "Ada Stone", value: 4 },
+      ]),
+      assists: expect.arrayContaining([
+        { playerId: "player-2", logoUrl: "https://example.com/kofi.png", playerName: "Kofi Mensah", value: 3 },
+      ]),
+    }));
+
+    const topScorer = await app.inject({ method: "GET", url: "/api/v1/public/top-goal-scorer" });
+    expect(topScorer.statusCode).toBe(200);
+    expect(topScorer.json()).toMatchObject({
+      playerId: "player-1",
+      logoUrl: "https://example.com/ada.png",
+    });
+  });
+
   it("includes lineups and team form in the public match detail payload", async () => {
     const app = await buildApp(
       {
