@@ -402,7 +402,7 @@ export async function buildApp(
       /^https:\/\/[a-z0-9-]+\.lovable\.app$/,
       /^https:\/\/[a-z0-9-]+\.vercel\.app$/,
     ],
-    methods: ["GET", "HEAD", "POST", "PATCH", "DELETE", "OPTIONS"],
+    methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     credentials: true,
   });
   await app.register(websocket);
