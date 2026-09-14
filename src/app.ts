@@ -832,22 +832,22 @@ export async function buildApp(
   });
 
   app.get("/api/v1/public/news", async () => {
-    const rows = await database.db
-      .collection("news")
-      .find({
-        deletedAt: { $exists: false },
-        $or: [
-          { status: { $in: ["Published", "published"] } },
-        ],
-      })
-      .sort({ published_at: -1, publishedAt: -1, createdAt: -1 })
-      .limit(1000)
-      .toArray();
+    const [rows, dashboards] = await Promise.all([
+      database.db
+        .collection("news")
+        .find({
+          deletedAt: { $exists: false },
+          $or: [
+            { status: { $in: ["Published", "published"] } },
+          ],
+        })
+        .sort({ published_at: -1, publishedAt: -1, createdAt: -1 })
+        .limit(1000)
+        .toArray(),
+      database.db.collection("teamDashboards").find({}).toArray(),
+    ]);
 
-    if (rows.length > 0) return rows.map((row) => publicDocument(row));
-
-    const dashboards = await database.db.collection("teamDashboards").find({}).toArray();
-    const legacyRows = dashboards.flatMap((dashboard) => {
+    const dashboardRows = dashboards.flatMap((dashboard) => {
       const data = (dashboard.data ?? {}) as Record<string, any>;
       const items = Array.isArray(data.news) ? data.news : [];
 
@@ -860,13 +860,29 @@ export async function buildApp(
         }));
     });
 
-    legacyRows.sort((a, b) => {
-      const aDate = new Date(a.publishedAt ?? a.updatedAt ?? a.at ?? 0).getTime();
-      const bDate = new Date(b.publishedAt ?? b.updatedAt ?? b.at ?? 0).getTime();
+    const seen = new Set<string>();
+    const uniqueRows = [...rows, ...dashboardRows].filter((row) => {
+      if (!row.id) return true;
+
+      const teamId = row.teamId ?? row.team_id ?? "";
+      const key = `${row.id}:${teamId}`;
+      if (seen.has(key)) return false;
+
+      seen.add(key);
+      return true;
+    });
+
+    uniqueRows.sort((a, b) => {
+      const aDate = new Date(
+        a.published_at ?? a.publishedAt ?? a.updatedAt ?? a.at ?? a.createdAt ?? 0,
+      ).getTime();
+      const bDate = new Date(
+        b.published_at ?? b.publishedAt ?? b.updatedAt ?? b.at ?? b.createdAt ?? 0,
+      ).getTime();
       return bDate - aDate;
     });
 
-    return legacyRows.slice(0, 1000).map((row) => publicDocument(row));
+    return uniqueRows.slice(0, 1000).map((row) => publicDocument(row));
   });
 
   app.get<{
