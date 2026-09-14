@@ -838,8 +838,6 @@ export async function buildApp(
         deletedAt: { $exists: false },
         $or: [
           { status: { $in: ["Published", "published"] } },
-          { published_at: { $exists: true, $ne: null } },
-          { publishedAt: { $exists: true, $ne: null } },
         ],
       })
       .sort({ published_at: -1, publishedAt: -1, createdAt: -1 })
