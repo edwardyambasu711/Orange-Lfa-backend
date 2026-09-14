@@ -30,6 +30,14 @@ const mediaSchema = z.object({
 
 const resourceNameSchema = z.string().regex(/^[a-z][a-zA-Z0-9_]*$/);
 
+const carouselSchema = z.object({
+  id: z.string().min(1).max(100),
+  photoUrl: z.string().min(1).max(15_000_000),
+  title: z.string().min(1).max(255),
+  subtitle: z.string().max(500),
+  buttonUrl: z.string().max(2000),
+});
+
 async function uploadMediaToCloudinary(
   config: AppConfig,
   data: string,
@@ -413,6 +421,37 @@ export async function buildApp(
     }
   });
 
+  app.get("/api/v1/public/carousel", async () => {
+    const content = await database.db.collection("siteContent").findOne({ id: "global" });
+    const carousel = content?.carousel;
+    return Array.isArray(carousel) ? carousel : [];
+  });
+
+  app.get("/api/v1/admin/carousel", async (request, reply) => {
+    if (!request.authUser) return reply.code(401).send({ error: "unauthorized" });
+    if (!request.authUser.roles.includes("super_admin") && !request.authUser.roles.includes("content_admin")) {
+      return reply.code(403).send({ error: "forbidden" });
+    }
+    const content = await database.db.collection("siteContent").findOne({ id: "global" });
+    const carousel = content?.carousel;
+    return Array.isArray(carousel) ? carousel : [];
+  });
+
+  app.put<{ Body: { carousel: unknown[] } }>("/api/v1/admin/carousel", async (request, reply) => {
+    if (!request.authUser) return reply.code(401).send({ error: "unauthorized" });
+    if (!request.authUser.roles.includes("super_admin") && !request.authUser.roles.includes("content_admin")) {
+      return reply.code(403).send({ error: "forbidden" });
+    }
+    const parsed = z.object({ carousel: z.array(carouselSchema).max(20) }).safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "invalid_request", details: parsed.error.flatten() });
+    await database.db.collection("siteContent").updateOne(
+      { id: "global" },
+      { $set: { id: "global", carousel: parsed.data.carousel, updatedAt: new Date() }, $setOnInsert: { createdAt: new Date() } },
+      { upsert: true },
+    );
+    return parsed.data.carousel;
+  });
+
   app.post("/api/v1/auth/login", async (request, reply) => {
     const parsed = loginSchema.safeParse(request.body);
     if (!parsed.success)
@@ -512,6 +551,7 @@ export async function buildApp(
       const data = dashboard.data as Record<string, any>;
       return {
         ...data,
+        carousel: Array.isArray(data.carousel) ? data.carousel : [],
         news: Array.isArray(data.news)
           ? data.news.filter((item) => item.status === "Published")
           : [],
@@ -938,7 +978,11 @@ export async function buildApp(
       }
       const dashboard = await database.db.collection("teamDashboards").findOne({ teamId });
       if (!dashboard) return reply.code(404).send({ error: "not_found" });
-      return dashboard.data;
+      const data = dashboard.data as Record<string, unknown>;
+      return {
+        ...data,
+        carousel: Array.isArray(data.carousel) ? data.carousel : [],
+      };
     },
   );
 
