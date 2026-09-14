@@ -35,6 +35,7 @@ const carouselSchema = z.object({
   photoUrl: z.string().min(1).max(15_000_000),
   title: z.string().min(1).max(255),
   subtitle: z.string().max(500),
+  buttonTitle: z.string().max(100).default(""),
   buttonUrl: z.string().max(2000),
 });
 
