@@ -438,7 +438,7 @@ export async function buildApp(
     return Array.isArray(carousel) ? carousel : [];
   });
 
-  app.put<{ Body: { carousel: unknown[] } }>("/api/v1/admin/carousel", async (request, reply) => {
+  const saveCarousel = async (request: { authUser: AuthUser | null; body: { carousel: unknown[] } }, reply: any) => {
     if (!request.authUser) return reply.code(401).send({ error: "unauthorized" });
     if (!request.authUser.roles.includes("super_admin") && !request.authUser.roles.includes("content_admin")) {
       return reply.code(403).send({ error: "forbidden" });
@@ -451,7 +451,10 @@ export async function buildApp(
       { upsert: true },
     );
     return parsed.data.carousel;
-  });
+  };
+
+  app.post<{ Body: { carousel: unknown[] } }>("/api/v1/admin/carousel", saveCarousel);
+  app.put<{ Body: { carousel: unknown[] } }>("/api/v1/admin/carousel", saveCarousel);
 
   app.post("/api/v1/auth/login", async (request, reply) => {
     const parsed = loginSchema.safeParse(request.body);
